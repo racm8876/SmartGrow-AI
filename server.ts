@@ -4,6 +4,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+// @ts-ignore
+import mammoth from 'mammoth';
 
 dotenv.config();
 
@@ -57,9 +59,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// JSON body parser with strict size limits to prevent memory exhaustion DoS
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+// JSON body parser with size limits allowing resume PDF/DOCX uploads
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 // ==========================================
 // SECURITY AUDIT: IN-MEMORY RATE LIMITING (SLIDING WINDOW)
@@ -700,6 +702,287 @@ Provide 3 polished ATS variations with explanation of why each is stronger.`;
   } catch (error: any) {
     console.error(`[Resume Polish Error ${correlationId}]:`, error.message);
     res.status(500).json({ error: 'Failed to polish resume bullet.', correlationId });
+  }
+});
+
+// B2. Resume File Parser & Structured Extractor (PDF, DOCX, TXT)
+app.post('/api/ai/parse-resume-file', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
+  try {
+    const { fileBase64, fileName = 'resume', fileMimeType = 'application/pdf', rawText = '' } = req.body;
+
+    if (!fileBase64 && !rawText) {
+      return res.status(400).json({ error: 'File data or raw text is required.', correlationId });
+    }
+
+    if (!checkAndIncrementAiUsage(res)) return;
+
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(503).json({
+        error: 'Gemini AI service unavailable. API key not configured in environment.',
+        correlationId,
+      });
+    }
+
+    let extractedText = rawText;
+    const lowerName = fileName.toLowerCase();
+    const isDocx =
+      fileMimeType.includes('word') ||
+      fileMimeType.includes('docx') ||
+      lowerName.endsWith('.docx') ||
+      lowerName.endsWith('.doc');
+
+    const cleanBase64 = fileBase64 ? fileBase64.replace(/^data:.*?;base64,/, '') : '';
+
+    if (isDocx && cleanBase64 && !extractedText) {
+      try {
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        const mammothResult = await mammoth.extractRawText({ buffer });
+        extractedText = mammothResult.value;
+      } catch (docErr: any) {
+        console.warn(`[DOCX Parse fallback ${correlationId}]:`, docErr.message);
+      }
+    }
+
+    const isPdf =
+      fileMimeType.includes('pdf') ||
+      lowerName.endsWith('.pdf') ||
+      (fileBase64 && fileBase64.startsWith('data:application/pdf'));
+
+    const systemPrompt = `You are a certified professional resume parser and ATS ingestion system.
+Extract the candidate's authentic resume data into the structured JSON schema.
+STRICT RULES:
+1. NEVER invent, hallucinate, or fabricate credentials, employment dates, degrees, or employers.
+2. Only extract information explicitly mentioned in the resume.
+3. If personal details like phone, email, or links are absent, return empty strings.
+4. For each experience position, extract all bullet points faithfully.
+5. Extract all skills categorized accurately into technical, soft, and tools.
+6. Provide an accurate target headline and executive summary based purely on their actual background.`;
+
+    let contentsPayload: any;
+
+    if (isPdf && cleanBase64 && !extractedText) {
+      // Use Gemini native PDF document understanding
+      contentsPayload = [
+        {
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: cleanBase64,
+          },
+        },
+        {
+          text: 'Parse this candidate resume PDF file completely and extract all sections into structured JSON according to the schema.',
+        },
+      ];
+    } else {
+      const textToParse = extractedText || (cleanBase64 ? Buffer.from(cleanBase64, 'base64').toString('utf-8') : '');
+      const sanitized = sanitizeText(textToParse, 30000);
+      contentsPayload = `Parse this candidate resume text completely and extract all sections into structured JSON according to the schema:
+"""${sanitized}"""`;
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: contentsPayload,
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            personal: {
+              type: Type.OBJECT,
+              properties: {
+                fullName: { type: Type.STRING },
+                email: { type: Type.STRING },
+                phone: { type: Type.STRING },
+                location: { type: Type.STRING },
+                headline: { type: Type.STRING },
+                summary: { type: Type.STRING },
+                linkedin: { type: Type.STRING },
+                github: { type: Type.STRING },
+                portfolio: { type: Type.STRING },
+              },
+              required: ['fullName', 'email', 'phone', 'location', 'headline', 'summary'],
+            },
+            experience: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  company: { type: Type.STRING },
+                  role: { type: Type.STRING },
+                  location: { type: Type.STRING },
+                  startDate: { type: Type.STRING },
+                  endDate: { type: Type.STRING },
+                  current: { type: Type.BOOLEAN },
+                  bullets: { type: Type.ARRAY, items: { type: Type.STRING } },
+                },
+                required: ['company', 'role', 'bullets'],
+              },
+            },
+            education: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  institution: { type: Type.STRING },
+                  degree: { type: Type.STRING },
+                  field: { type: Type.STRING },
+                  location: { type: Type.STRING },
+                  graduationYear: { type: Type.STRING },
+                  grade: { type: Type.STRING },
+                },
+                required: ['institution', 'degree'],
+              },
+            },
+            skills: {
+              type: Type.OBJECT,
+              properties: {
+                technical: { type: Type.ARRAY, items: { type: Type.STRING } },
+                soft: { type: Type.ARRAY, items: { type: Type.STRING } },
+                tools: { type: Type.ARRAY, items: { type: Type.STRING } },
+              },
+              required: ['technical', 'soft', 'tools'],
+            },
+            projects: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  technologies: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  bullets: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  liveUrl: { type: Type.STRING },
+                  githubUrl: { type: Type.STRING },
+                },
+                required: ['title', 'bullets'],
+              },
+            },
+            certifications: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  issuer: { type: Type.STRING },
+                  date: { type: Type.STRING },
+                  credentialUrl: { type: Type.STRING },
+                },
+                required: ['title', 'issuer'],
+              },
+            },
+          },
+          required: ['personal', 'experience', 'education', 'skills'],
+        },
+      },
+    });
+
+    const parsedData = JSON.parse(response.text || '{}');
+
+    if (parsedData.experience) {
+      parsedData.experience = parsedData.experience.map((exp: any, i: number) => ({
+        ...exp,
+        id: `exp_${Date.now()}_${i}`,
+        current: exp.current || exp.endDate?.toLowerCase() === 'present',
+      }));
+    }
+    if (parsedData.education) {
+      parsedData.education = parsedData.education.map((edu: any, i: number) => ({
+        ...edu,
+        id: `edu_${Date.now()}_${i}`,
+      }));
+    }
+    if (parsedData.projects) {
+      parsedData.projects = parsedData.projects.map((proj: any, i: number) => ({
+        ...proj,
+        id: `proj_${Date.now()}_${i}`,
+      }));
+    }
+    if (parsedData.certifications) {
+      parsedData.certifications = parsedData.certifications.map((cert: any, i: number) => ({
+        ...cert,
+        id: `cert_${Date.now()}_${i}`,
+      }));
+    }
+
+    res.json({
+      success: true,
+      data: parsedData,
+      rawExtractedLength: extractedText ? extractedText.length : 0,
+    });
+  } catch (error: any) {
+    console.error(`[Resume File Parse Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to parse resume document. Please check the file.', correlationId });
+  }
+});
+
+// B3. Resume Grammar, Clarity & ATS Formatting Auditor
+app.post('/api/ai/resume-grammar-check', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
+  try {
+    const { resume } = req.body;
+    if (!resume) {
+      return res.status(400).json({ error: 'Resume data is required.', correlationId });
+    }
+    if (!checkAndIncrementAiUsage(res)) return;
+
+    const resumeSummary = JSON.stringify({
+      personal: resume.personal,
+      experience: resume.experience,
+      skills: resume.skills,
+    });
+
+    const systemPrompt = `You are an elite executive resume editor and recruiter.
+Analyze the candidate's resume for:
+1. Grammatical errors and typos.
+2. Passive voice that should be replaced with proactive action verbs.
+3. Vague statements that lack measurable impact.
+4. Structural formatting consistency.
+Provide actionable suggestions that preserve the candidate's authentic experience without inventing facts.`;
+
+    const userPrompt = `Audit this resume content for grammar, ATS tone, and impact:
+"""${sanitizeText(resumeSummary, 15000)}"""`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: userPrompt,
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            overallGrade: { type: Type.STRING },
+            grammarScore: { type: Type.INTEGER },
+            issuesFound: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  type: { type: Type.STRING },
+                  originalText: { type: Type.STRING },
+                  improvedText: { type: Type.STRING },
+                  explanation: { type: Type.STRING },
+                },
+                required: ['type', 'originalText', 'improvedText', 'explanation'],
+              },
+            },
+            recommendedSummary: { type: Type.STRING },
+            generalAdvice: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['overallGrade', 'grammarScore', 'issuesFound', 'generalAdvice'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    res.json({ success: true, data: parsed });
+  } catch (error: any) {
+    console.error(`[Resume Grammar Check Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to audit resume grammar.', correlationId });
   }
 });
 

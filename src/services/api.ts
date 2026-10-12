@@ -262,6 +262,45 @@ export async function analyzeResume(params: {
   return handleResponse(res);
 }
 
+export async function parseResumeFile(params: {
+  fileBase64?: string;
+  fileName?: string;
+  fileMimeType?: string;
+  rawText?: string;
+}): Promise<{ success: boolean; data: ResumeData }> {
+  const res = await fetch('/api/ai/parse-resume-file', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(params),
+  });
+  return handleResponse(res);
+}
+
+export async function auditResumeGrammar(params: {
+  resume: ResumeData;
+}): Promise<{
+  success: boolean;
+  data: {
+    overallGrade: string;
+    grammarScore: number;
+    issuesFound: {
+      type: string;
+      originalText: string;
+      improvedText: string;
+      explanation: string;
+    }[];
+    recommendedSummary?: string;
+    generalAdvice: string[];
+  };
+}> {
+  const res = await fetch('/api/ai/resume-grammar-check', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(params),
+  });
+  return handleResponse(res);
+}
+
 export async function analyzeJobDescription(params: {
   jobDescriptionText: string;
   resumeSummary?: string;

@@ -2,6 +2,7 @@
   "name": "SmartGrow AI — AI Business & Job Assistant Platform",
   "description": "All-in-one AI platform empowering small businesses with marketing copy, GST invoices, quotations, and customer tracking, while accelerating job seekers with ATS resumes, interview prep, and application management.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
-

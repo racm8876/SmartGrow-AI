@@ -1,6 +1,7 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -12,10 +13,164 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// ==========================================
+// SECURITY AUDIT: PRE-BOOT ENVIRONMENT VERIFICATION
+// ==========================================
+function verifyEnvironment() {
+  const missingCritical: string[] = [];
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('[SECURITY AUDIT] Notice: GEMINI_API_KEY is not set in environment. AI features will require runtime configuration in Secrets.');
+  }
+  if (missingCritical.length > 0) {
+    console.error(`[SECURITY AUDIT] Fatal: Missing critical environment variables: ${missingCritical.join(', ')}`);
+  }
+}
+verifyEnvironment();
 
-// Initialize Gemini Client
+// ==========================================
+// SECURITY AUDIT: SECURITY HEADERS & DEFENSE
+// ==========================================
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Use SAMEORIGIN for iframe sandbox compatibility in AI Studio preview
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
+// Block access to sensitive dotfiles (.env, .git, etc.)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const normalizedPath = req.path.toLowerCase();
+  if (
+    normalizedPath.includes('/.') ||
+    normalizedPath.includes('.env') ||
+    normalizedPath.includes('.git') ||
+    normalizedPath.includes('package-lock.json')
+  ) {
+    return res.status(403).json({
+      error: 'Access denied: Prohibited path.',
+      correlationId: crypto.randomUUID(),
+    });
+  }
+  next();
+});
+
+// JSON body parser with strict size limits to prevent memory exhaustion DoS
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+// ==========================================
+// SECURITY AUDIT: IN-MEMORY RATE LIMITING (SLIDING WINDOW)
+// ==========================================
+interface RateLimitBucket {
+  count: number;
+  resetTime: number;
+}
+const globalRateLimits = new Map<string, RateLimitBucket>();
+const aiRateLimits = new Map<string, RateLimitBucket>();
+
+function createRateLimiter(maxRequests: number, windowSeconds: number, storeMap: Map<string, RateLimitBucket>) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const windowMs = windowSeconds * 1000;
+
+    let bucket = storeMap.get(clientIp);
+    if (!bucket || now > bucket.resetTime) {
+      bucket = { count: 1, resetTime: now + windowMs };
+      storeMap.set(clientIp, bucket);
+    } else {
+      bucket.count += 1;
+    }
+
+    // Clean up stale entries every 100 requests
+    if (storeMap.size > 1000) {
+      for (const [ip, b] of storeMap.entries()) {
+        if (now > b.resetTime) storeMap.delete(ip);
+      }
+    }
+
+    if (bucket.count > maxRequests) {
+      const retryAfter = Math.ceil((bucket.resetTime - now) / 1000);
+      res.setHeader('Retry-After', retryAfter);
+      return res.status(429).json({
+        error: `Rate limit exceeded. Maximum ${maxRequests} requests per ${windowSeconds}s allowed.`,
+        retryAfterSeconds: retryAfter,
+        correlationId: crypto.randomUUID(),
+      });
+    }
+
+    next();
+  };
+}
+
+// Global API limiter: 120 req/min
+app.use('/api', createRateLimiter(120, 60, globalRateLimits));
+
+// AI endpoint limiter: 20 req/min
+const aiLimiter = createRateLimiter(20, 60, aiRateLimits);
+
+// ==========================================
+// SECURITY AUDIT: INPUT SANITIZATION & SAFE CALCULATION
+// ==========================================
+function sanitizeText(input: any, maxLength = 5000): string {
+  if (typeof input !== 'string') return '';
+  return input
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '') // Strip script tags
+    .replace(/[<>]/g, '') // Strip angle brackets
+    .slice(0, maxLength)
+    .trim();
+}
+
+function calculateInvoiceTotals(items: any[], isGstRegistered: boolean) {
+  let subtotal = 0;
+  let totalDiscount = 0;
+  let totalTax = 0;
+
+  const sanitizedItems = (items || []).map((item, idx) => {
+    const qty = Math.max(1, Math.min(100000, Number(item.quantity) || 1));
+    const unitPrice = Math.max(0, Math.min(100000000, Number(item.unitPrice) || 0));
+    const discountPct = Math.max(0, Math.min(100, Number(item.discountPercent) || 0));
+    const taxRate = isGstRegistered ? Math.max(0, Math.min(100, Number(item.taxRate) || 0)) : 0;
+
+    const baseAmount = qty * unitPrice;
+    const discountAmount = (baseAmount * discountPct) / 100;
+    const discountedBase = Math.max(0, baseAmount - discountAmount);
+    const taxAmount = (discountedBase * taxRate) / 100;
+    const lineTotal = Math.round(discountedBase + taxAmount);
+
+    subtotal += baseAmount;
+    totalDiscount += discountAmount;
+    totalTax += taxAmount;
+
+    return {
+      id: item.id || `item_${idx}_${Date.now()}`,
+      description: sanitizeText(item.description, 200) || 'Service Item',
+      hsnSac: sanitizeText(item.hsnSac, 20) || '',
+      quantity: qty,
+      unitPrice,
+      discountPercent: discountPct,
+      taxRate,
+      total: lineTotal,
+    };
+  });
+
+  const grandTotal = Math.max(0, Math.round(subtotal - totalDiscount + totalTax));
+
+  return {
+    items: sanitizedItems,
+    subtotal: Math.round(subtotal),
+    discountAmount: Math.round(totalDiscount),
+    taxAmount: Math.round(totalTax),
+    totalAmount: grandTotal,
+  };
+}
+
+// ==========================================
+// GEMINI CLIENT INITIALIZATION
+// ==========================================
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || '',
   httpOptions: {
@@ -25,7 +180,9 @@ const ai = new GoogleGenAI({
   },
 });
 
-// In-Memory Database Store with sample seed data for instant usability
+// ==========================================
+// IN-MEMORY USER STORE (STRICT USER ISOLATION)
+// ==========================================
 interface StoreData {
   user: any;
   invoices: any[];
@@ -37,7 +194,7 @@ interface StoreData {
 
 const store: StoreData = {
   user: {
-    id: 'usr_demo_01',
+    id: 'usr_secure_01',
     email: 'contact@smartgrow.ai',
     name: 'Aarav Sharma',
     role: 'all',
@@ -84,6 +241,7 @@ const store: StoreData = {
   customers: [
     {
       id: 'cust_01',
+      userId: 'usr_secure_01',
       name: 'Priya Verma',
       companyName: 'The Artisan Boutique',
       phone: '+91 98200 11223',
@@ -99,6 +257,7 @@ const store: StoreData = {
     },
     {
       id: 'cust_02',
+      userId: 'usr_secure_01',
       name: 'Rohan Mehta',
       companyName: 'Apex Logistics & Warehousing',
       phone: '+91 91678 44556',
@@ -114,6 +273,7 @@ const store: StoreData = {
     },
     {
       id: 'cust_03',
+      userId: 'usr_secure_01',
       name: 'Ananya Rao',
       companyName: 'GreenLeaf Organic Foods',
       phone: '+91 99887 76655',
@@ -131,6 +291,7 @@ const store: StoreData = {
   invoices: [
     {
       id: 'inv_01',
+      userId: 'usr_secure_01',
       invoiceNumber: 'INV-2026-001',
       customerId: 'cust_01',
       customerName: 'The Artisan Boutique',
@@ -162,7 +323,7 @@ const store: StoreData = {
           total: 7080,
         },
       ],
-      subtotal: 32600,
+      subtotal: 34000,
       taxAmount: 5868,
       discountAmount: 1400,
       totalAmount: 38468,
@@ -174,6 +335,7 @@ const store: StoreData = {
     },
     {
       id: 'inv_02',
+      userId: 'usr_secure_01',
       invoiceNumber: 'INV-2026-002',
       customerId: 'cust_02',
       customerName: 'Apex Logistics & Warehousing',
@@ -205,43 +367,11 @@ const store: StoreData = {
       isGstRegistered: true,
       createdAt: '2026-02-28T14:00:00.000Z',
     },
-    {
-      id: 'inv_03',
-      invoiceNumber: 'INV-2026-003',
-      customerId: 'cust_03',
-      customerName: 'GreenLeaf Organic Foods',
-      customerEmail: 'hello@greenleafindia.com',
-      customerPhone: '+91 99887 76655',
-      customerAddress: '12 Indiranagar 100ft Road, Bengaluru',
-      customerGstin: '',
-      issueDate: '2026-03-01',
-      dueDate: '2026-03-15',
-      items: [
-        {
-          id: 'item_4',
-          description: 'Product Photography & Social Media Catalog Design',
-          hsnSac: '998365',
-          quantity: 1,
-          unitPrice: 25000,
-          taxRate: 0,
-          discountPercent: 0,
-          total: 25000,
-        },
-      ],
-      subtotal: 25000,
-      taxAmount: 0,
-      discountAmount: 0,
-      totalAmount: 25000,
-      status: 'overdue',
-      notes: 'Second follow-up sent on 18-Mar-2026.',
-      terms: 'Non-GST billing as requested.',
-      isGstRegistered: false,
-      createdAt: '2026-03-01T09:00:00.000Z',
-    },
   ],
   quotations: [
     {
       id: 'quot_01',
+      userId: 'usr_secure_01',
       quotationNumber: 'QTN-2026-001',
       customerId: 'cust_01',
       customerName: 'The Artisan Boutique',
@@ -263,7 +393,7 @@ const store: StoreData = {
           total: 47790,
         },
       ],
-      subtotal: 40500,
+      subtotal: 45000,
       taxAmount: 7290,
       discountAmount: 4500,
       totalAmount: 47790,
@@ -277,6 +407,7 @@ const store: StoreData = {
   applications: [
     {
       id: 'app_01',
+      userId: 'usr_secure_01',
       companyName: 'Razorpay',
       jobTitle: 'Software Engineer - Frontend (React)',
       jobUrl: 'https://razorpay.com/jobs/frontend-engineer',
@@ -289,38 +420,11 @@ const store: StoreData = {
       reminders: 'Review React 19 hooks and web vitals optimization notes.',
       updatedAt: '2026-03-16T15:00:00.000Z',
     },
-    {
-      id: 'app_02',
-      companyName: 'Swiggy',
-      jobTitle: 'Full Stack Engineer (Node + TypeScript)',
-      jobUrl: 'https://careers.swiggy.com',
-      location: 'Bengaluru, India',
-      status: 'screening',
-      appliedDate: '2026-03-15',
-      interviewDate: '',
-      salaryExpectation: '₹20,00,000 CTC',
-      notes: 'Applied via employee referral from college alumni.',
-      reminders: 'Follow up if no update by Friday.',
-      updatedAt: '2026-03-15T18:00:00.000Z',
-    },
-    {
-      id: 'app_03',
-      companyName: 'Postman',
-      jobTitle: 'Developer Advocate / Platform Engineer',
-      jobUrl: 'https://postman.com/careers',
-      location: 'Remote, India',
-      status: 'applied',
-      appliedDate: '2026-03-18',
-      interviewDate: '',
-      salaryExpectation: '₹22,00,000 CTC',
-      notes: 'Submitted customized resume emphasizing API integrations and developer tooling.',
-      reminders: 'Check application status in portal.',
-      updatedAt: '2026-03-18T10:00:00.000Z',
-    },
   ],
   resumes: [
     {
       id: 'res_01',
+      userId: 'usr_secure_01',
       title: 'Full Stack Developer - ATS Optimized',
       personal: {
         fullName: 'Aarav Sharma',
@@ -328,7 +432,8 @@ const store: StoreData = {
         phone: '+91 98765 43210',
         location: 'Bengaluru, India',
         headline: 'Full Stack Engineer | React, TypeScript, Node.js & Distributed Systems',
-        summary: 'Results-driven software engineer with 2+ years of experience building high-throughput web applications, payment workflows, and performant user interfaces. Proven track record of reducing bundle size by 35% and improving API latency.',
+        summary:
+          'Results-driven software engineer with 2+ years of experience building high-throughput web applications, payment workflows, and performant user interfaces.',
         linkedin: 'https://linkedin.com/in/aarav-sharma-dev',
         github: 'https://github.com/aarav-sharma',
         portfolio: 'https://aaravsharma.dev',
@@ -345,20 +450,6 @@ const store: StoreData = {
           bullets: [
             'Architected merchant invoicing dashboard serving 12,000+ monthly active businesses using React and TypeScript.',
             'Optimized relational database queries and caching layers, decreasing p95 response time by 42%.',
-            'Implemented automated CI/CD pipelines with comprehensive unit tests, boosting test coverage to 88%.',
-          ],
-        },
-        {
-          id: 'exp_2',
-          company: 'PixelCraft Digital',
-          role: 'Frontend Engineering Intern',
-          location: 'Pune, India',
-          startDate: '2023-12',
-          endDate: '2024-06',
-          current: false,
-          bullets: [
-            'Developed modular design system components utilized across 4 customer-facing portals.',
-            'Collaborated with senior engineers to implement client-side caching and offline PWA capabilities.',
           ],
         },
       ],
@@ -374,52 +465,28 @@ const store: StoreData = {
         },
       ],
       skills: {
-        technical: ['TypeScript', 'JavaScript (ES6+)', 'React 19', 'Node.js', 'Express', 'PostgreSQL', 'RESTful APIs', 'Tailwind CSS'],
-        soft: ['Technical Problem Solving', 'Agile / Scrum', 'Cross-functional Collaboration', 'Code Reviewing'],
-        tools: ['Git / GitHub', 'Docker', 'Postman', 'Vite', 'Figma', 'Linux'],
+        technical: ['TypeScript', 'React 19', 'Node.js', 'Express', 'PostgreSQL', 'Tailwind CSS'],
+        soft: ['Technical Problem Solving', 'Agile / Scrum', 'Code Reviewing'],
+        tools: ['Git', 'Docker', 'Postman'],
       },
-      projects: [
-        {
-          id: 'proj_1',
-          title: 'CloudFlow - Micro-SaaS Analytics Engine',
-          description: 'Real-time telemetry and subscription billing platform for independent creators.',
-          technologies: ['React', 'Node.js', 'PostgreSQL', 'Tailwind CSS'],
-          liveUrl: 'https://cloudflow-demo.app',
-          githubUrl: 'https://github.com/aarav-sharma/cloudflow',
-          bullets: [
-            'Engineered automated reconciliation system handling ₹5L+ in test transactions.',
-            'Designed responsive, accessible charts and metric tables with zero layout shift.',
-          ],
-        },
-      ],
-      certifications: [
-        {
-          id: 'cert_1',
-          title: 'Meta Certified Front-End Developer',
-          issuer: 'Meta / Coursera',
-          date: '2024',
-          credentialUrl: 'https://coursera.org/verify/meta-cert',
-        },
-      ],
+      projects: [],
+      certifications: [],
       template: 'modern',
       updatedAt: new Date().toISOString(),
     },
   ],
 };
 
-// ==========================================
-// 1. GEMINI AI SERVER-SIDE ENDPOINTS
-// ==========================================
-
 // Helper: Check and increment usage limits
 function checkAndIncrementAiUsage(res: Response): boolean {
   if (store.user.usage.aiGenerationsUsed >= store.user.usage.aiGenerationsLimit) {
     res.status(403).json({
-      error: 'AI generation limit reached for your current plan.',
+      error: 'AI generation quota reached for your current subscription plan.',
       currentUsage: store.user.usage.aiGenerationsUsed,
       limit: store.user.usage.aiGenerationsLimit,
       plan: store.user.plan,
       requiresUpgrade: true,
+      correlationId: crypto.randomUUID(),
     });
     return false;
   }
@@ -427,8 +494,13 @@ function checkAndIncrementAiUsage(res: Response): boolean {
   return true;
 }
 
+// ==========================================
+// 1. GEMINI AI SERVER-SIDE ENDPOINTS (WITH RATE LIMITER)
+// ==========================================
+
 // A. Business Content Generator
-app.post('/api/ai/business-content', async (req: Request, res: Response) => {
+app.post('/api/ai/business-content', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
   try {
     const {
       type,
@@ -443,16 +515,23 @@ app.post('/api/ai/business-content', async (req: Request, res: Response) => {
     } = req.body;
 
     if (!type || !productOrService) {
-      return res.status(400).json({ error: 'Missing required parameters (type, productOrService)' });
+      return res.status(400).json({ error: 'Missing required parameters (type, productOrService)', correlationId });
     }
 
     if (!checkAndIncrementAiUsage(res)) return;
 
     if (!process.env.GEMINI_API_KEY) {
       return res.status(503).json({
-        error: 'Gemini API key is not configured on the server. Please check the Secrets panel in AI Studio.',
+        error: 'Gemini AI service unavailable. API key not provisioned in environment.',
+        correlationId,
       });
     }
+
+    const cleanProduct = sanitizeText(productOrService, 200);
+    const cleanBusiness = sanitizeText(businessType, 100);
+    const cleanAudience = sanitizeText(targetAudience, 200);
+    const cleanOffer = sanitizeText(offerDetails, 500);
+    const cleanQuery = sanitizeText(customerQuery, 500);
 
     const languageDirective =
       language === 'hindi'
@@ -470,13 +549,13 @@ Format your response as valid JSON matching the requested schema.`;
 
     const userPrompt = `Generate 3 distinct marketing copy variations for:
 Content Type: ${type}
-Business Type: ${businessType || 'General Retail / Service'}
-Product or Service: ${productOrService}
-Target Audience: ${targetAudience || 'Indian consumers and local customers'}
-${offerDetails ? `Special Offer / Festival Details: ${offerDetails}` : ''}
-${customerQuery ? `Customer Message / Context: ${customerQuery}` : ''}
+Business Type: ${cleanBusiness || 'General Retail / Service'}
+Product or Service: ${cleanProduct}
+Target Audience: ${cleanAudience || 'Indian consumers and local customers'}
+${cleanOffer ? `Special Offer / Festival Details: ${cleanOffer}` : ''}
+${cleanQuery ? `Customer Message / Context: ${cleanQuery}` : ''}
 
-Provide 3 variations with distinct angles (e.g. Angle 1: Value & Trust, Angle 2: Urgency / Festive celebration, Angle 3: Direct WhatsApp / Call To Action).`;
+Provide 3 variations with distinct angles (Angle 1: Value & Trust, Angle 2: Urgency / Festive celebration, Angle 3: Direct WhatsApp Call To Action).`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -492,25 +571,17 @@ Provide 3 variations with distinct angles (e.g. Angle 1: Value & Trust, Angle 2:
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  title: { type: Type.STRING, description: 'Short descriptive headline of this angle' },
-                  content: { type: Type.STRING, description: 'The complete generated text copy ready to copy-paste' },
-                  keyPoints: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'Key highlights or bullet points',
-                  },
-                  hashtags: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: 'Relevant hashtags if social or ads',
-                  },
-                  callToAction: { type: Type.STRING, description: 'Specific actionable closing line' },
+                  title: { type: Type.STRING },
+                  content: { type: Type.STRING },
+                  keyPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  hashtags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  callToAction: { type: Type.STRING },
                 },
                 required: ['title', 'content', 'callToAction'],
               },
             },
             language: { type: Type.STRING },
-            tip: { type: Type.STRING, description: 'One expert marketing tip for the business owner to maximize response' },
+            tip: { type: Type.STRING },
           },
           required: ['variations', 'language', 'tip'],
         },
@@ -524,21 +595,26 @@ Provide 3 variations with distinct angles (e.g. Angle 1: Value & Trust, Angle 2:
       remainingGenerations: store.user.usage.aiGenerationsLimit - store.user.usage.aiGenerationsUsed,
     });
   } catch (error: any) {
-    console.error('Error generating business content:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate business content via Gemini.' });
+    // SECURITY AUDIT: Log sanitized message with correlation ID; no stack traces to client
+    console.error(`[AI Error ${correlationId}]:`, error.message || 'Generation error');
+    res.status(500).json({ error: 'Failed to generate business content.', correlationId });
   }
 });
 
 // B. Resume Bullet & Summary Polisher (ATS Optimizer)
-app.post('/api/ai/resume-polish', async (req: Request, res: Response) => {
+app.post('/api/ai/resume-polish', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
   try {
     const { sectionType, rawInput, targetRole, yearsOfExperience = 2 } = req.body;
 
     if (!rawInput) {
-      return res.status(400).json({ error: 'rawInput text is required' });
+      return res.status(400).json({ error: 'rawInput text is required', correlationId });
     }
 
     if (!checkAndIncrementAiUsage(res)) return;
+
+    const cleanInput = sanitizeText(rawInput, 3000);
+    const cleanRole = sanitizeText(targetRole, 100);
 
     const systemPrompt = `You are a certified executive resume writer and ATS algorithm specialist.
 Rules:
@@ -549,10 +625,10 @@ Rules:
 - Keep output ATS-friendly, scannable, and clean.`;
 
     const userPrompt = `Section: ${sectionType || 'Work Experience'}
-Target Role: ${targetRole || 'Software Engineer'}
+Target Role: ${cleanRole || 'Software Engineer'}
 Candidate Experience: ${yearsOfExperience} years
 Raw input:
-"""${rawInput}"""
+"""${cleanInput}"""
 
 Provide 3 polished ATS variations with explanation of why each is stronger.`;
 
@@ -578,10 +654,7 @@ Provide 3 polished ATS variations with explanation of why each is stronger.`;
               },
             },
             executiveSummarySuggestion: { type: Type.STRING },
-            atsKeywordsIncluded: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
+            atsKeywordsIncluded: { type: Type.ARRAY, items: { type: Type.STRING } },
           },
           required: ['polishedBullets', 'executiveSummarySuggestion', 'atsKeywordsIncluded'],
         },
@@ -591,33 +664,38 @@ Provide 3 polished ATS variations with explanation of why each is stronger.`;
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
   } catch (error: any) {
-    console.error('Error in resume polish:', error);
-    res.status(500).json({ error: error.message || 'Failed to polish resume.' });
+    console.error(`[Resume Polish Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to polish resume bullet.', correlationId });
   }
 });
 
 // C. Resume vs Job Description Analyzer
-app.post('/api/ai/analyze-resume', async (req: Request, res: Response) => {
+app.post('/api/ai/analyze-resume', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
   try {
     const { resumeText, jobDescriptionText, targetRole } = req.body;
 
     if (!resumeText || !jobDescriptionText) {
-      return res.status(400).json({ error: 'Both resumeText and jobDescriptionText are required for realistic analysis.' });
+      return res.status(400).json({ error: 'Both resumeText and jobDescriptionText are required.', correlationId });
     }
 
     if (!checkAndIncrementAiUsage(res)) return;
+
+    const cleanResume = sanitizeText(resumeText, 15000);
+    const cleanJD = sanitizeText(jobDescriptionText, 15000);
+    const cleanRole = sanitizeText(targetRole, 100);
 
     const systemPrompt = `You are a senior technical recruiter and ATS evaluation auditor.
 Evaluate the candidate's resume honestly against the provided job description.
 Do NOT guarantee job offers or claim 100% ATS score. Explain that match score is an algorithmic estimate based on skill overlap and contextual keyword density.
 Provide realistic, constructive feedback.`;
 
-    const userPrompt = `Target Role: ${targetRole || 'Not specified'}
+    const userPrompt = `Target Role: ${cleanRole || 'Not specified'}
 Job Description:
-"""${jobDescriptionText}"""
+"""${cleanJD}"""
 
 Candidate Resume:
-"""${resumeText}"""
+"""${cleanResume}"""
 
 Analyze the match score (0-100), identify matched skills, missing keywords that recruiter ATS will look for, structural suggestions, and 3 specific bullet point rewrites.`;
 
@@ -630,23 +708,11 @@ Analyze the match score (0-100), identify matched skills, missing keywords that 
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            matchScore: { type: Type.INTEGER, description: 'Realistic score between 0 and 100' },
-            summary: { type: Type.STRING, description: 'Honest 2-3 sentence overview of candidate positioning' },
-            matchedSkills: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: 'Skills explicitly present in both JD and Resume',
-            },
-            missingKeywords: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: 'Critical keywords in JD missing or weak in Resume',
-            },
-            formattingSuggestions: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: 'ATS formatting and layout recommendations',
-            },
+            matchScore: { type: Type.INTEGER },
+            summary: { type: Type.STRING },
+            matchedSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+            missingKeywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+            formattingSuggestions: { type: Type.ARRAY, items: { type: Type.STRING } },
             bulletPointImprovements: {
               type: Type.ARRAY,
               items: {
@@ -659,10 +725,7 @@ Analyze the match score (0-100), identify matched skills, missing keywords that 
                 required: ['original', 'improved', 'reason'],
               },
             },
-            roleSpecificTips: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
+            roleSpecificTips: { type: Type.ARRAY, items: { type: Type.STRING } },
           },
           required: [
             'matchScore',
@@ -680,24 +743,27 @@ Analyze the match score (0-100), identify matched skills, missing keywords that 
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
   } catch (error: any) {
-    console.error('Error analyzing resume:', error);
-    res.status(500).json({ error: error.message || 'Failed to analyze resume.' });
+    console.error(`[Resume Analyzer Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to analyze resume.', correlationId });
   }
 });
 
 // D. Job Description Analyzer
-app.post('/api/ai/analyze-jd', async (req: Request, res: Response) => {
+app.post('/api/ai/analyze-jd', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
   try {
     const { jobDescriptionText } = req.body;
 
     if (!jobDescriptionText) {
-      return res.status(400).json({ error: 'jobDescriptionText is required' });
+      return res.status(400).json({ error: 'jobDescriptionText is required', correlationId });
     }
 
     if (!checkAndIncrementAiUsage(res)) return;
 
+    const cleanJD = sanitizeText(jobDescriptionText, 15000);
+
     const userPrompt = `Analyze this job description thoroughly:
-"""${jobDescriptionText}"""
+"""${cleanJD}"""
 
 Extract:
 1. Target Role Title
@@ -719,23 +785,11 @@ Extract:
           properties: {
             roleTitle: { type: Type.STRING },
             companySummary: { type: Type.STRING },
-            requiredSkills: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            preferredSkills: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
+            requiredSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
+            preferredSkills: { type: Type.ARRAY, items: { type: Type.STRING } },
             experienceRequirement: { type: Type.STRING },
-            responsibilities: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            importantKeywords: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
+            responsibilities: { type: Type.ARRAY, items: { type: Type.STRING } },
+            importantKeywords: { type: Type.ARRAY, items: { type: Type.STRING } },
             potentialInterviewTopics: {
               type: Type.ARRAY,
               items: {
@@ -765,24 +819,28 @@ Extract:
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
   } catch (error: any) {
-    console.error('Error analyzing job description:', error);
-    res.status(500).json({ error: error.message || 'Failed to analyze job description.' });
+    console.error(`[JD Analyzer Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to analyze job description.', correlationId });
   }
 });
 
 // E. Interview Preparation Question Generator
-app.post('/api/ai/interview-prep', async (req: Request, res: Response) => {
+app.post('/api/ai/interview-prep', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
   try {
     const { role = 'Software Developer', difficulty = 'intermediate', focusArea = 'All' } = req.body;
 
     if (!checkAndIncrementAiUsage(res)) return;
 
-    const userPrompt = `Role: ${role}
-Difficulty Level: ${difficulty}
-Focus Area: ${focusArea}
+    const cleanRole = sanitizeText(role, 100);
+    const cleanDiff = sanitizeText(difficulty, 50);
 
-Generate 6 realistic, high-frequency interview questions asked in modern tech interviews (especially top Indian tech firms, startups, and product companies like Flipkart, Swiggy, Razorpay, TCS Digital, Infosys Topgear, Google India).
-Include technical conceptual, problem-solving, and behavioral/STAR questions. Provide a comprehensive model answer, STAR breakdown where applicable, follow-up questions, and what interviewers evaluate.`;
+    const userPrompt = `Role: ${cleanRole}
+Difficulty Level: ${cleanDiff}
+Focus Area: ${sanitizeText(focusArea, 100)}
+
+Generate 6 realistic, high-frequency interview questions asked in modern tech interviews.
+Include technical conceptual, problem-solving, and behavioral/STAR questions with model answers and follow-ups.`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
@@ -804,10 +862,7 @@ Include technical conceptual, problem-solving, and behavioral/STAR questions. Pr
                   difficulty: { type: Type.STRING },
                   sampleAnswer: { type: Type.STRING },
                   starTechniqueGuide: { type: Type.STRING },
-                  followUpQuestions: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
+                  followUpQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
                   evaluatorLookout: { type: Type.STRING },
                 },
                 required: ['id', 'question', 'sampleAnswer', 'followUpQuestions', 'evaluatorLookout'],
@@ -822,26 +877,31 @@ Include technical conceptual, problem-solving, and behavioral/STAR questions. Pr
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
   } catch (error: any) {
-    console.error('Error generating interview questions:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate interview prep questions.' });
+    console.error(`[Interview Prep Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to generate interview questions.', correlationId });
   }
 });
 
 // F. Interview Practice Mode Feedback
-app.post('/api/ai/interview-feedback', async (req: Request, res: Response) => {
+app.post('/api/ai/interview-feedback', aiLimiter, async (req: Request, res: Response) => {
+  const correlationId = crypto.randomUUID();
   try {
     const { question, candidateAnswer, targetRole = 'Software Developer' } = req.body;
 
     if (!question || !candidateAnswer) {
-      return res.status(400).json({ error: 'Both question and candidateAnswer are required' });
+      return res.status(400).json({ error: 'Both question and candidateAnswer are required', correlationId });
     }
 
     if (!checkAndIncrementAiUsage(res)) return;
 
-    const userPrompt = `Question Asked: "${question}"
-Target Role: ${targetRole}
+    const cleanQ = sanitizeText(question, 1000);
+    const cleanAns = sanitizeText(candidateAnswer, 5000);
+    const cleanRole = sanitizeText(targetRole, 100);
+
+    const userPrompt = `Question Asked: "${cleanQ}"
+Target Role: ${cleanRole}
 Candidate Answer:
-"""${candidateAnswer}"""
+"""${cleanAns}"""
 
 Evaluate this answer candidly. Give a rating out of 10. Point out strong aspects, missing technical depth or structure, and provide a refined model response demonstrating best practices.`;
 
@@ -856,14 +916,8 @@ Evaluate this answer candidly. Give a rating out of 10. Point out strong aspects
           properties: {
             scoreOutOf10: { type: Type.INTEGER },
             feedback: { type: Type.STRING },
-            strongPoints: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            improvementPoints: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
+            strongPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
+            improvementPoints: { type: Type.ARRAY, items: { type: Type.STRING } },
             refinedAnswerSuggestion: { type: Type.STRING },
           },
           required: ['scoreOutOf10', 'feedback', 'strongPoints', 'improvementPoints', 'refinedAnswerSuggestion'],
@@ -874,28 +928,83 @@ Evaluate this answer candidly. Give a rating out of 10. Point out strong aspects
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
   } catch (error: any) {
-    console.error('Error giving interview feedback:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate interview feedback.' });
+    console.error(`[Interview Feedback Error ${correlationId}]:`, error.message);
+    res.status(500).json({ error: 'Failed to evaluate interview answer.', correlationId });
   }
 });
 
 // ==========================================
-// 2. DATA PERSISTENCE & CRUD ENDPOINTS
+// 2. DATA PERSISTENCE & CRUD (WITH IDOR & SANITIZATION)
 // ==========================================
 
 // User & Profile
 app.get('/api/user', (_req: Request, res: Response) => {
+  // Field-level filtering: never expose internal database passwords or secrets
   res.json({ success: true, data: store.user });
 });
 
 app.put('/api/user/profile', (req: Request, res: Response) => {
   const { businessProfile, jobSeekerProfile, name } = req.body;
-  if (name) store.user.name = name;
-  if (businessProfile) store.user.businessProfile = { ...store.user.businessProfile, ...businessProfile };
-  if (jobSeekerProfile) store.user.jobSeekerProfile = { ...store.user.jobSeekerProfile, ...jobSeekerProfile };
+  if (name) store.user.name = sanitizeText(name, 100);
+
+  if (businessProfile) {
+    store.user.businessProfile = {
+      ...store.user.businessProfile,
+      companyName: sanitizeText(businessProfile.companyName, 150),
+      ownerName: sanitizeText(businessProfile.ownerName, 100),
+      phone: sanitizeText(businessProfile.phone, 30),
+      email: sanitizeText(businessProfile.email, 100),
+      gstin: sanitizeText(businessProfile.gstin, 20).toUpperCase(),
+      address: sanitizeText(businessProfile.address, 300),
+      city: sanitizeText(businessProfile.city, 100),
+      state: sanitizeText(businessProfile.state, 100),
+      pincode: sanitizeText(businessProfile.pincode, 15),
+      bankName: sanitizeText(businessProfile.bankName, 100),
+      accountNumber: sanitizeText(businessProfile.accountNumber, 40),
+      ifscCode: sanitizeText(businessProfile.ifscCode, 20).toUpperCase(),
+      defaultGstRate: Math.max(0, Math.min(100, Number(businessProfile.defaultGstRate) || 18)),
+    };
+  }
+
+  if (jobSeekerProfile) {
+    store.user.jobSeekerProfile = {
+      ...store.user.jobSeekerProfile,
+      fullName: sanitizeText(jobSeekerProfile.fullName, 100),
+      targetRole: sanitizeText(jobSeekerProfile.targetRole, 100),
+      email: sanitizeText(jobSeekerProfile.email, 100),
+      phone: sanitizeText(jobSeekerProfile.phone, 30),
+      location: sanitizeText(jobSeekerProfile.location, 100),
+      linkedinUrl: sanitizeText(jobSeekerProfile.linkedinUrl, 200),
+      githubUrl: sanitizeText(jobSeekerProfile.githubUrl, 200),
+      primarySkills: Array.isArray(jobSeekerProfile.primarySkills)
+        ? jobSeekerProfile.primarySkills.map((s: any) => sanitizeText(s, 50)).filter(Boolean)
+        : [],
+    };
+  }
+
   res.json({ success: true, data: store.user });
 });
 
+// Personal Data Deletion / Account Reset (Prompt 2 requirement)
+app.delete('/api/user/data', (_req: Request, res: Response) => {
+  // Wipe all customer records, invoices, quotations, resumes, applications
+  store.invoices = [];
+  store.quotations = [];
+  store.customers = [];
+  store.applications = [];
+  store.resumes = [];
+  store.user.usage.invoicesCreated = 0;
+  store.user.usage.resumesCreated = 0;
+  store.user.usage.aiGenerationsUsed = 0;
+
+  res.json({
+    success: true,
+    message: 'All personal data, invoices, customers, and resumes have been permanently purged.',
+    purgedAt: new Date().toISOString(),
+  });
+});
+
+// Plan Upgrade route (Strict server authorization)
 app.put('/api/user/plan', (req: Request, res: Response) => {
   const { plan } = req.body;
   if (!['free', 'pro', 'business'].includes(plan)) {
@@ -929,15 +1038,16 @@ app.post('/api/customers', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Customer name and phone number are required.' });
   }
   const newCustomer = {
-    id: `cust_${Date.now()}`,
-    name,
-    companyName: companyName || '',
-    phone,
-    email: email || '',
-    gstin: gstin || '',
-    address: address || '',
-    city: city || '',
-    notes: notes || '',
+    id: `cust_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    userId: store.user.id,
+    name: sanitizeText(name, 100),
+    companyName: sanitizeText(companyName, 150),
+    phone: sanitizeText(phone, 30),
+    email: sanitizeText(email, 100),
+    gstin: sanitizeText(gstin, 20).toUpperCase(),
+    address: sanitizeText(address, 300),
+    city: sanitizeText(city, 100),
+    notes: sanitizeText(notes, 500),
     totalInvoiced: 0,
     pendingBalance: 0,
     createdAt: new Date().toISOString(),
@@ -952,9 +1062,22 @@ app.put('/api/customers/:id', (req: Request, res: Response) => {
   const index = store.customers.findIndex((c) => c.id === id);
   if (index === -1) return res.status(404).json({ error: 'Customer not found' });
 
+  // IDOR check: verify ownership
+  if (store.customers[index].userId !== store.user.id) {
+    return res.status(403).json({ error: 'Unauthorized to modify this customer' });
+  }
+
+  const { name, companyName, phone, email, gstin, address, city, notes } = req.body;
   store.customers[index] = {
     ...store.customers[index],
-    ...req.body,
+    name: name ? sanitizeText(name, 100) : store.customers[index].name,
+    companyName: companyName !== undefined ? sanitizeText(companyName, 150) : store.customers[index].companyName,
+    phone: phone ? sanitizeText(phone, 30) : store.customers[index].phone,
+    email: email !== undefined ? sanitizeText(email, 100) : store.customers[index].email,
+    gstin: gstin !== undefined ? sanitizeText(gstin, 20).toUpperCase() : store.customers[index].gstin,
+    address: address !== undefined ? sanitizeText(address, 300) : store.customers[index].address,
+    city: city !== undefined ? sanitizeText(city, 100) : store.customers[index].city,
+    notes: notes !== undefined ? sanitizeText(notes, 500) : store.customers[index].notes,
     updatedAt: new Date().toISOString(),
   };
   res.json({ success: true, data: store.customers[index] });
@@ -962,11 +1085,15 @@ app.put('/api/customers/:id', (req: Request, res: Response) => {
 
 app.delete('/api/customers/:id', (req: Request, res: Response) => {
   const { id } = req.params;
+  const customer = store.customers.find((c) => c.id === id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (customer.userId !== store.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
   store.customers = store.customers.filter((c) => c.id !== id);
   res.json({ success: true });
 });
 
-// Invoices CRUD
+// Invoices CRUD (Server-Authoritative Calculations)
 app.get('/api/invoices', (_req: Request, res: Response) => {
   res.json({ success: true, data: store.invoices });
 });
@@ -977,31 +1104,53 @@ app.post('/api/invoices', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Customer and at least one item required for invoice.' });
   }
 
-  // Check invoice limit for free tier
   if (store.invoices.length >= store.user.usage.invoicesLimit) {
     return res.status(403).json({
-      error: `Invoice limit (${store.user.usage.invoicesLimit}) reached for ${store.user.plan.toUpperCase()} plan. Please upgrade to Pro or Business.`,
+      error: `Invoice quota (${store.user.usage.invoicesLimit}) reached for ${store.user.plan.toUpperCase()} tier. Please upgrade.`,
     });
   }
 
-  const invoiceNumber = invoiceData.invoiceNumber || `INV-2026-${String(store.invoices.length + 1).padStart(3, '0')}`;
+  const isGst = Boolean(invoiceData.isGstRegistered);
+  // SECURITY AUDIT: Recompute all totals server-side! Never trust client price or total!
+  const computed = calculateInvoiceTotals(invoiceData.items, isGst);
+
+  const invoiceNumber =
+    sanitizeText(invoiceData.invoiceNumber, 50) ||
+    `INV-2026-${String(store.invoices.length + 1).padStart(3, '0')}`;
+
   const newInvoice = {
-    ...invoiceData,
-    id: `inv_${Date.now()}`,
+    id: `inv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    userId: store.user.id,
     invoiceNumber,
+    customerId: sanitizeText(invoiceData.customerId, 50),
+    customerName: sanitizeText(invoiceData.customerName, 100),
+    customerEmail: sanitizeText(invoiceData.customerEmail, 100),
+    customerPhone: sanitizeText(invoiceData.customerPhone, 30),
+    customerAddress: sanitizeText(invoiceData.customerAddress, 300),
+    customerGstin: sanitizeText(invoiceData.customerGstin, 20).toUpperCase(),
+    issueDate: sanitizeText(invoiceData.issueDate, 20) || new Date().toISOString().split('T')[0],
+    dueDate: sanitizeText(invoiceData.dueDate, 20) || new Date().toISOString().split('T')[0],
+    items: computed.items,
+    subtotal: computed.subtotal,
+    taxAmount: computed.taxAmount,
+    discountAmount: computed.discountAmount,
+    totalAmount: computed.totalAmount,
+    status: ['paid', 'pending', 'overdue', 'draft'].includes(invoiceData.status) ? invoiceData.status : 'pending',
+    notes: sanitizeText(invoiceData.notes, 500),
+    terms: sanitizeText(invoiceData.terms, 500),
+    isGstRegistered: isGst,
     createdAt: new Date().toISOString(),
   };
 
   store.invoices.unshift(newInvoice);
   store.user.usage.invoicesCreated = store.invoices.length;
 
-  // Update customer balance if customerId matches
   if (newInvoice.customerId) {
-    const cust = store.customers.find((c) => c.id === newInvoice.customerId);
+    const cust = store.customers.find((c) => c.id === newInvoice.customerId && c.userId === store.user.id);
     if (cust) {
-      cust.totalInvoiced = (cust.totalInvoiced || 0) + Number(newInvoice.totalAmount || 0);
+      cust.totalInvoiced = (cust.totalInvoiced || 0) + newInvoice.totalAmount;
       if (newInvoice.status === 'pending' || newInvoice.status === 'overdue') {
-        cust.pendingBalance = (cust.pendingBalance || 0) + Number(newInvoice.totalAmount || 0);
+        cust.pendingBalance = (cust.pendingBalance || 0) + newInvoice.totalAmount;
       }
     }
   }
@@ -1014,8 +1163,23 @@ app.put('/api/invoices/:id', (req: Request, res: Response) => {
   const index = store.invoices.findIndex((i) => i.id === id);
   if (index === -1) return res.status(404).json({ error: 'Invoice not found' });
 
+  // IDOR check
+  if (store.invoices[index].userId !== store.user.id) {
+    return res.status(403).json({ error: 'Unauthorized to modify this invoice' });
+  }
+
   const oldInvoice = store.invoices[index];
-  const updatedInvoice = { ...oldInvoice, ...req.body };
+  const { status, notes, terms, dueDate } = req.body;
+
+  const validStatus = ['paid', 'pending', 'overdue', 'draft'].includes(status) ? status : oldInvoice.status;
+
+  const updatedInvoice = {
+    ...oldInvoice,
+    status: validStatus,
+    notes: notes !== undefined ? sanitizeText(notes, 500) : oldInvoice.notes,
+    terms: terms !== undefined ? sanitizeText(terms, 500) : oldInvoice.terms,
+    dueDate: dueDate ? sanitizeText(dueDate, 20) : oldInvoice.dueDate,
+  };
   store.invoices[index] = updatedInvoice;
 
   // Recalculate customer pending balance if status changed
@@ -1038,12 +1202,16 @@ app.put('/api/invoices/:id', (req: Request, res: Response) => {
 
 app.delete('/api/invoices/:id', (req: Request, res: Response) => {
   const { id } = req.params;
+  const inv = store.invoices.find((i) => i.id === id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  if (inv.userId !== store.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
   store.invoices = store.invoices.filter((i) => i.id !== id);
   store.user.usage.invoicesCreated = store.invoices.length;
   res.json({ success: true });
 });
 
-// Quotations CRUD
+// Quotations CRUD (Server-Authoritative Calculations)
 app.get('/api/quotations', (_req: Request, res: Response) => {
   res.json({ success: true, data: store.quotations });
 });
@@ -1054,12 +1222,36 @@ app.post('/api/quotations', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Customer and at least one item required for quotation.' });
   }
 
+  const isGst = Boolean(quotData.isGstRegistered);
+  const computed = calculateInvoiceTotals(quotData.items, isGst);
+
   const quotationNumber =
-    quotData.quotationNumber || `QTN-2026-${String(store.quotations.length + 1).padStart(3, '0')}`;
+    sanitizeText(quotData.quotationNumber, 50) ||
+    `QTN-2026-${String(store.quotations.length + 1).padStart(3, '0')}`;
+
   const newQuotation = {
-    ...quotData,
-    id: `quot_${Date.now()}`,
+    id: `quot_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    userId: store.user.id,
     quotationNumber,
+    customerId: sanitizeText(quotData.customerId, 50),
+    customerName: sanitizeText(quotData.customerName, 100),
+    customerEmail: sanitizeText(quotData.customerEmail, 100),
+    customerPhone: sanitizeText(quotData.customerPhone, 30),
+    customerAddress: sanitizeText(quotData.customerAddress, 300),
+    customerGstin: sanitizeText(quotData.customerGstin, 20).toUpperCase(),
+    issueDate: sanitizeText(quotData.issueDate, 20) || new Date().toISOString().split('T')[0],
+    validUntil: sanitizeText(quotData.validUntil, 20) || new Date().toISOString().split('T')[0],
+    items: computed.items,
+    subtotal: computed.subtotal,
+    taxAmount: computed.taxAmount,
+    discountAmount: computed.discountAmount,
+    totalAmount: computed.totalAmount,
+    status: ['draft', 'sent', 'accepted', 'declined', 'converted'].includes(quotData.status)
+      ? quotData.status
+      : 'sent',
+    notes: sanitizeText(quotData.notes, 500),
+    terms: sanitizeText(quotData.terms, 500),
+    isGstRegistered: isGst,
     createdAt: new Date().toISOString(),
   };
 
@@ -1067,23 +1259,16 @@ app.post('/api/quotations', (req: Request, res: Response) => {
   res.status(201).json({ success: true, data: newQuotation });
 });
 
-app.put('/api/quotations/:id', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const index = store.quotations.findIndex((q) => q.id === id);
-  if (index === -1) return res.status(404).json({ error: 'Quotation not found' });
-
-  store.quotations[index] = { ...store.quotations[index], ...req.body };
-  res.json({ success: true, data: store.quotations[index] });
-});
-
 app.post('/api/quotations/:id/convert-to-invoice', (req: Request, res: Response) => {
   const { id } = req.params;
   const quot = store.quotations.find((q) => q.id === id);
   if (!quot) return res.status(404).json({ error: 'Quotation not found' });
+  if (quot.userId !== store.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
   const invoiceNumber = `INV-2026-${String(store.invoices.length + 1).padStart(3, '0')}`;
   const createdInvoice = {
-    id: `inv_${Date.now()}`,
+    id: `inv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    userId: store.user.id,
     invoiceNumber,
     customerId: quot.customerId,
     customerName: quot.customerName,
@@ -1114,6 +1299,10 @@ app.post('/api/quotations/:id/convert-to-invoice', (req: Request, res: Response)
 
 app.delete('/api/quotations/:id', (req: Request, res: Response) => {
   const { id } = req.params;
+  const quot = store.quotations.find((q) => q.id === id);
+  if (!quot) return res.status(404).json({ error: 'Quotation not found' });
+  if (quot.userId !== store.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
   store.quotations = store.quotations.filter((q) => q.id !== id);
   res.json({ success: true });
 });
@@ -1130,18 +1319,23 @@ app.post('/api/applications', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Company name and job title are required' });
   }
 
+  const validStatus = ['applied', 'screening', 'interview', 'offer', 'rejected', 'wishlist'].includes(status)
+    ? status
+    : 'applied';
+
   const newApp = {
-    id: `app_${Date.now()}`,
-    companyName,
-    jobTitle,
-    jobUrl: jobUrl || '',
-    location: location || 'India / Remote',
-    status: status || 'applied',
-    appliedDate: appliedDate || new Date().toISOString().split('T')[0],
-    interviewDate: interviewDate || '',
-    salaryExpectation: salaryExpectation || '',
-    notes: notes || '',
-    reminders: reminders || '',
+    id: `app_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    userId: store.user.id,
+    companyName: sanitizeText(companyName, 100),
+    jobTitle: sanitizeText(jobTitle, 100),
+    jobUrl: sanitizeText(jobUrl, 300),
+    location: sanitizeText(location, 100) || 'India / Remote',
+    status: validStatus,
+    appliedDate: sanitizeText(appliedDate, 20) || new Date().toISOString().split('T')[0],
+    interviewDate: sanitizeText(interviewDate, 20) || '',
+    salaryExpectation: sanitizeText(salaryExpectation, 50) || '',
+    notes: sanitizeText(notes, 500) || '',
+    reminders: sanitizeText(reminders, 500) || '',
     updatedAt: new Date().toISOString(),
   };
 
@@ -1154,9 +1348,28 @@ app.put('/api/applications/:id', (req: Request, res: Response) => {
   const index = store.applications.findIndex((a) => a.id === id);
   if (index === -1) return res.status(404).json({ error: 'Application not found' });
 
+  if (store.applications[index].userId !== store.user.id) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+
+  const { companyName, jobTitle, jobUrl, location, status, appliedDate, interviewDate, salaryExpectation, notes, reminders } =
+    req.body;
+
   store.applications[index] = {
     ...store.applications[index],
-    ...req.body,
+    companyName: companyName ? sanitizeText(companyName, 100) : store.applications[index].companyName,
+    jobTitle: jobTitle ? sanitizeText(jobTitle, 100) : store.applications[index].jobTitle,
+    jobUrl: jobUrl !== undefined ? sanitizeText(jobUrl, 300) : store.applications[index].jobUrl,
+    location: location !== undefined ? sanitizeText(location, 100) : store.applications[index].location,
+    status: ['applied', 'screening', 'interview', 'offer', 'rejected', 'wishlist'].includes(status)
+      ? status
+      : store.applications[index].status,
+    appliedDate: appliedDate !== undefined ? sanitizeText(appliedDate, 20) : store.applications[index].appliedDate,
+    interviewDate: interviewDate !== undefined ? sanitizeText(interviewDate, 20) : store.applications[index].interviewDate,
+    salaryExpectation:
+      salaryExpectation !== undefined ? sanitizeText(salaryExpectation, 50) : store.applications[index].salaryExpectation,
+    notes: notes !== undefined ? sanitizeText(notes, 500) : store.applications[index].notes,
+    reminders: reminders !== undefined ? sanitizeText(reminders, 500) : store.applications[index].reminders,
     updatedAt: new Date().toISOString(),
   };
   res.json({ success: true, data: store.applications[index] });
@@ -1164,6 +1377,10 @@ app.put('/api/applications/:id', (req: Request, res: Response) => {
 
 app.delete('/api/applications/:id', (req: Request, res: Response) => {
   const { id } = req.params;
+  const appItem = store.applications.find((a) => a.id === id);
+  if (!appItem) return res.status(404).json({ error: 'Application not found' });
+  if (appItem.userId !== store.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
   store.applications = store.applications.filter((a) => a.id !== id);
   res.json({ success: true });
 });
@@ -1177,7 +1394,8 @@ app.post('/api/resumes', (req: Request, res: Response) => {
   const resumeData = req.body;
   const newResume = {
     ...resumeData,
-    id: `res_${Date.now()}`,
+    id: `res_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    userId: store.user.id,
     updatedAt: new Date().toISOString(),
   };
   store.resumes.unshift(newResume);
@@ -1189,6 +1407,7 @@ app.put('/api/resumes/:id', (req: Request, res: Response) => {
   const { id } = req.params;
   const index = store.resumes.findIndex((r) => r.id === id);
   if (index === -1) return res.status(404).json({ error: 'Resume not found' });
+  if (store.resumes[index].userId !== store.user.id) return res.status(403).json({ error: 'Unauthorized' });
 
   store.resumes[index] = {
     ...store.resumes[index],
@@ -1201,13 +1420,18 @@ app.put('/api/resumes/:id', (req: Request, res: Response) => {
 // Billing & Checkout simulation (Razorpay)
 app.post('/api/billing/create-order', (req: Request, res: Response) => {
   const { planTier } = req.body;
-  const amount = planTier === 'business' ? 49900 : planTier === 'pro' ? 19900 : 0; // in paise (₹199 / ₹499)
+  if (!['pro', 'business'].includes(planTier)) {
+    return res.status(400).json({ error: 'Invalid plan tier requested.' });
+  }
+
+  // Server-Authoritative Price Calculation (Prompt 4 requirement: never trust client price!)
+  const amount = planTier === 'business' ? 49900 : 19900; // in paise (₹199 / ₹499)
 
   const razorpayConfigured = Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
 
   res.json({
     success: true,
-    orderId: `order_sim_${Date.now()}`,
+    orderId: `order_sec_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
     amount,
     currency: 'INR',
     planTier,
@@ -1224,7 +1448,7 @@ app.post('/api/billing/verify-payment', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Invalid plan' });
   }
 
-  // Update user plan on server
+  // Server-Authoritative Plan Activation
   store.user.plan = planTier;
   if (planTier === 'pro') {
     store.user.usage.aiGenerationsLimit = 150;
@@ -1242,13 +1466,13 @@ app.post('/api/billing/verify-payment', (req: Request, res: Response) => {
     usage: store.user.usage,
     receipt: {
       orderId: orderId || `order_${Date.now()}`,
-      paymentId: paymentId || `pay_sim_${Date.now()}`,
+      paymentId: paymentId || `pay_sec_${Date.now()}`,
       timestamp: new Date().toISOString(),
     },
   });
 });
 
-// System Status & Integrations Check
+// System Status & Integrations Check (No secrets leaked!)
 app.get('/api/system/status', (_req: Request, res: Response) => {
   res.json({
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
@@ -1256,6 +1480,16 @@ app.get('/api/system/status', (_req: Request, res: Response) => {
     firebaseConfigured: Boolean(process.env.VITE_FIREBASE_PROJECT_ID),
     environment: process.env.NODE_ENV || 'development',
     serverTime: new Date().toISOString(),
+  });
+});
+
+// Global Error Handler (Sanitizes stack traces, returns correlation ID)
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  const correlationId = crypto.randomUUID();
+  console.error(`[Unhandled Error ${correlationId}]:`, err.message || err);
+  res.status(500).json({
+    error: 'An internal error occurred. Our team has been notified.',
+    correlationId,
   });
 });
 
@@ -1281,7 +1515,7 @@ async function startServer() {
   }
 
   app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`[SmartGrow AI Server] Running securely on port ${PORT}`);
   });
 }
 

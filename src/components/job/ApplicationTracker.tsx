@@ -27,7 +27,7 @@ const STATUS_COLUMNS: { status: ApplicationStatus; label: string; color: string 
 ];
 
 export const ApplicationTracker: React.FC = () => {
-  const { applications, refreshApplications, addToast } = useApp();
+  const { applications, addApplication, editApplication, removeApplication, addToast } = useApp();
 
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
@@ -85,7 +85,7 @@ export const ApplicationTracker: React.FC = () => {
 
     try {
       if (editingApp) {
-        const res = await api.updateApplication(editingApp.id, {
+        await editApplication(editingApp.id, {
           companyName,
           jobTitle,
           jobUrl,
@@ -97,13 +97,10 @@ export const ApplicationTracker: React.FC = () => {
           notes,
           reminders,
         });
-        if (res.success) {
-          addToast('success', 'Application record updated.');
-          setIsModalOpen(false);
-          await refreshApplications();
-        }
+        addToast('success', 'Application record updated in Firestore.');
+        setIsModalOpen(false);
       } else {
-        const res = await api.createApplication({
+        await addApplication({
           companyName,
           jobTitle,
           jobUrl,
@@ -115,11 +112,8 @@ export const ApplicationTracker: React.FC = () => {
           notes,
           reminders,
         });
-        if (res.success) {
-          addToast('success', 'New application tracked!');
-          setIsModalOpen(false);
-          await refreshApplications();
-        }
+        addToast('success', 'New application tracked and saved to Firestore!');
+        setIsModalOpen(false);
       }
     } catch (err: any) {
       addToast('error', err.message);
@@ -128,9 +122,8 @@ export const ApplicationTracker: React.FC = () => {
 
   const handleQuickStatusChange = async (appId: string, newStatus: ApplicationStatus) => {
     try {
-      await api.updateApplication(appId, { status: newStatus });
+      await editApplication(appId, { status: newStatus });
       addToast('success', `Moved to ${newStatus.toUpperCase()}`);
-      await refreshApplications();
     } catch (err: any) {
       addToast('error', err.message);
     }
@@ -139,9 +132,8 @@ export const ApplicationTracker: React.FC = () => {
   const handleDelete = async (id: string) => {
     if (!confirm('Remove this application record?')) return;
     try {
-      await api.deleteApplication(id);
-      addToast('info', 'Application record removed.');
-      await refreshApplications();
+      await removeApplication(id);
+      addToast('info', 'Application record removed from Firestore.');
     } catch (err: any) {
       addToast('error', err.message);
     }

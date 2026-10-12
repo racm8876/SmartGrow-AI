@@ -1,0 +1,160 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account profile, settings, usage counters, and subscription plan",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email", "description": "User email address" },
+        "name": { "type": "string", "description": "Display name" },
+        "role": { "type": "string", "enum": ["business", "job_seeker", "all"], "description": "Primary role selected" },
+        "plan": { "type": "string", "enum": ["free", "pro", "business"], "description": "Subscription tier" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "plan"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "GST Tax invoice record with itemized products, rates, and tax calculations",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "customerAddress": { "type": "string" },
+        "customerGstin": { "type": "string" },
+        "issueDate": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "subtotal": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "pending", "paid", "overdue", "cancelled"] },
+        "notes": { "type": "string" },
+        "terms": { "type": "string" },
+        "isGstRegistered": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "invoiceNumber", "totalAmount", "status"]
+    },
+    "Quotation": {
+      "title": "Quotation",
+      "description": "Quotation and estimate document with validity date",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "quotationNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "customerAddress": { "type": "string" },
+        "issueDate": { "type": "string" },
+        "validUntil": { "type": "string" },
+        "subtotal": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "sent", "accepted", "rejected", "converted"] },
+        "notes": { "type": "string" },
+        "terms": { "type": "string" },
+        "isGstRegistered": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "quotationNumber", "totalAmount", "status"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer contact details, GSTIN, and ledger totals",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "companyName": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "gstin": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "notes": { "type": "string" },
+        "totalInvoiced": { "type": "number" },
+        "pendingBalance": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name"]
+    },
+    "JobApplication": {
+      "title": "JobApplication",
+      "description": "Job application status tracker across recruitment pipeline stages",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "companyName": { "type": "string" },
+        "jobTitle": { "type": "string" },
+        "jobUrl": { "type": "string" },
+        "location": { "type": "string" },
+        "status": { "type": "string", "enum": ["applied", "screening", "interview", "offer", "rejected", "wishlist"] },
+        "appliedDate": { "type": "string" },
+        "interviewDate": { "type": "string" },
+        "salaryExpectation": { "type": "string" },
+        "notes": { "type": "string" },
+        "reminders": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "companyName", "jobTitle", "status"]
+    },
+    "Resume": {
+      "title": "Resume",
+      "description": "ATS formatted resume document with education, experience, and skills",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "title": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "location": { "type": "string" },
+        "summary": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "fullName"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "User" },
+      "description": "Stores user account profile, usage limits, and business/job seeker profiles"
+    },
+    "/users/{userId}/invoices/{invoiceId}": {
+      "schema": { "$ref": "Invoice" },
+      "description": "Stores GST tax invoices created by the authenticated user"
+    },
+    "/users/{userId}/quotations/{quotationId}": {
+      "schema": { "$ref": "Quotation" },
+      "description": "Stores business estimates and quotations created by the authenticated user"
+    },
+    "/users/{userId}/customers/{customerId}": {
+      "schema": { "$ref": "Customer" },
+      "description": "Stores customer directory and billing ledgers for the authenticated user"
+    },
+    "/users/{userId}/applications/{applicationId}": {
+      "schema": { "$ref": "JobApplication" },
+      "description": "Stores job application pipeline records for the authenticated user"
+    },
+    "/users/{userId}/resumes/{resumeId}": {
+      "schema": { "$ref": "Resume" },
+      "description": "Stores saved ATS resume templates and documents for the authenticated user"
+    }
+  }
+}

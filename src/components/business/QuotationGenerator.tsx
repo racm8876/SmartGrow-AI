@@ -17,7 +17,7 @@ import { Quotation, InvoiceItem, QuotationStatus } from '../../types';
 import * as api from '../../services/api';
 
 export const QuotationGenerator: React.FC = () => {
-  const { quotations, customers, user, refreshQuotations, refreshInvoices, addToast } = useApp();
+  const { quotations, customers, user, addToast, addQuotation, editQuotation, removeQuotation, addInvoice } = useApp();
 
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
@@ -127,7 +127,7 @@ export const QuotationGenerator: React.FC = () => {
     }
 
     try {
-      const res = await api.createQuotation({
+      const created = await addQuotation({
         customerName,
         customerEmail,
         customerPhone,
@@ -146,11 +146,8 @@ export const QuotationGenerator: React.FC = () => {
         terms,
       });
 
-      if (res.success) {
-        addToast('success', `Quotation ${res.data.quotationNumber} generated.`);
-        setIsModalOpen(false);
-        await refreshQuotations();
-      }
+      addToast('success', `Quotation ${created.quotationNumber} saved to Firestore.`);
+      setIsModalOpen(false);
     } catch (err: any) {
       addToast('error', err.message);
     }
@@ -158,11 +155,27 @@ export const QuotationGenerator: React.FC = () => {
 
   const handleConvertToInvoice = async (quot: Quotation) => {
     try {
-      const res = await api.convertQuotationToInvoice(quot.id);
-      if (res.success) {
-        addToast('success', `Quotation converted to Invoice ${res.data.invoice.invoiceNumber}!`);
-        await Promise.all([refreshQuotations(), refreshInvoices()]);
-      }
+      const invoice = await addInvoice({
+        customerId: quot.customerId,
+        customerName: quot.customerName,
+        customerEmail: quot.customerEmail,
+        customerPhone: quot.customerPhone,
+        customerAddress: quot.customerAddress,
+        customerGstin: quot.customerGstin,
+        issueDate: new Date().toISOString().split('T')[0],
+        dueDate: new Date(Date.now() + 15 * 86400000).toISOString().split('T')[0],
+        items: quot.items,
+        subtotal: quot.subtotal,
+        taxAmount: quot.taxAmount,
+        discountAmount: quot.discountAmount,
+        totalAmount: quot.totalAmount,
+        status: 'pending',
+        isGstRegistered: quot.isGstRegistered,
+        notes: `Converted from Quotation ${quot.quotationNumber}. ${quot.notes}`,
+        terms: quot.terms,
+      });
+      await editQuotation(quot.id, { status: 'converted' });
+      addToast('success', `Quotation converted to Invoice ${invoice.invoiceNumber}!`);
     } catch (err: any) {
       addToast('error', err.message);
     }
@@ -171,9 +184,8 @@ export const QuotationGenerator: React.FC = () => {
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this quotation?')) return;
     try {
-      await api.deleteQuotation(id);
-      addToast('info', 'Quotation removed.');
-      await refreshQuotations();
+      await removeQuotation(id);
+      addToast('info', 'Quotation removed from Firestore.');
     } catch (err: any) {
       addToast('error', err.message);
     }

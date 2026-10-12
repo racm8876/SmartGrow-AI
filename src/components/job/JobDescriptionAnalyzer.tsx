@@ -46,7 +46,7 @@ Requirements:
     setAnalysis(null);
 
     try {
-      const res = await api.analyzeJobDescription(rawJd);
+      const res = await api.analyzeJobDescription({ jobDescriptionText: rawJd });
       if (res.success && res.data) {
         setAnalysis(res.data);
         await refreshUserData();

@@ -1,0 +1,45 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Test connection probe
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Strict Zero-Trust Per-User Subtree Isolation
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      match /invoices/{invoiceId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /quotations/{quotationId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /customers/{customerId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /applications/{applicationId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /resumes/{resumeId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /ai_history/{historyId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Explicit Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

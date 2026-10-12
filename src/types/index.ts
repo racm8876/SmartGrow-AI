@@ -70,6 +70,7 @@ export type InvoiceStatus = 'paid' | 'pending' | 'overdue' | 'draft';
 
 export interface Invoice {
   id: string;
+  userId?: string;
   invoiceNumber: string;
   customerId: string;
   customerName: string;
@@ -95,6 +96,7 @@ export type QuotationStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'conv
 
 export interface Quotation {
   id: string;
+  userId?: string;
   quotationNumber: string;
   customerId: string;
   customerName: string;
@@ -119,6 +121,7 @@ export interface Quotation {
 
 export interface Customer {
   id: string;
+  userId?: string;
   name: string;
   companyName?: string;
   phone: string;
@@ -213,6 +216,7 @@ export interface Certification {
 
 export interface ResumeData {
   id: string;
+  userId?: string;
   title: string;
   personal: {
     fullName: string;
@@ -271,7 +275,7 @@ export interface InterviewQuestion {
   id: string;
   roleCategory: string;
   question: string;
-  difficulty: 'fresher' | 'intermediate' | 'advanced';
+  difficulty: 'fresher' | 'intermediate' | 'advanced' | 'mid' | 'senior';
   sampleAnswer: string;
   starTechniqueGuide?: string;
   followUpQuestions: string[];
@@ -290,6 +294,7 @@ export type ApplicationStatus = 'applied' | 'screening' | 'interview' | 'offer' 
 
 export interface JobApplication {
   id: string;
+  userId?: string;
   companyName: string;
   jobTitle: string;
   jobUrl?: string;

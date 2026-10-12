@@ -18,7 +18,7 @@ import { Invoice, InvoiceItem, InvoiceStatus } from '../../types';
 import * as api from '../../services/api';
 
 export const InvoiceGenerator: React.FC = () => {
-  const { invoices, customers, user, refreshInvoices, addToast, refreshCustomers } = useApp();
+  const { invoices, customers, user, addToast, addInvoice, editInvoice, removeInvoice, refreshCustomers } = useApp();
 
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
@@ -140,7 +140,7 @@ export const InvoiceGenerator: React.FC = () => {
     }
 
     try {
-      const res = await api.createInvoice({
+      const created = await addInvoice({
         customerName,
         customerEmail,
         customerPhone,
@@ -159,11 +159,9 @@ export const InvoiceGenerator: React.FC = () => {
         terms,
       });
 
-      if (res.success) {
-        addToast('success', `Invoice ${res.data.invoiceNumber} created successfully!`);
-        setIsModalOpen(false);
-        await Promise.all([refreshInvoices(), refreshCustomers()]);
-      }
+      addToast('success', `Invoice ${created.invoiceNumber} saved to Firestore!`);
+      setIsModalOpen(false);
+      await refreshCustomers();
     } catch (err: any) {
       addToast('error', err.message || 'Failed to save invoice.');
     }
@@ -171,11 +169,9 @@ export const InvoiceGenerator: React.FC = () => {
 
   const handleStatusChange = async (inv: Invoice, newStatus: InvoiceStatus) => {
     try {
-      const res = await api.updateInvoice(inv.id, { status: newStatus });
-      if (res.success) {
-        addToast('success', `Invoice status updated to ${newStatus.toUpperCase()}`);
-        await Promise.all([refreshInvoices(), refreshCustomers()]);
-      }
+      await editInvoice(inv.id, { status: newStatus });
+      addToast('success', `Invoice status updated to ${newStatus.toUpperCase()}`);
+      await refreshCustomers();
     } catch (err: any) {
       addToast('error', err.message || 'Failed to update invoice.');
     }
@@ -184,9 +180,8 @@ export const InvoiceGenerator: React.FC = () => {
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this invoice?')) return;
     try {
-      await api.deleteInvoice(id);
-      addToast('info', 'Invoice removed.');
-      await refreshInvoices();
+      await removeInvoice(id);
+      addToast('info', 'Invoice removed from Firestore.');
     } catch (err: any) {
       addToast('error', err.message);
     }

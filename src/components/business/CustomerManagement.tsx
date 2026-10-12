@@ -19,7 +19,7 @@ import { Customer } from '../../types';
 import * as api from '../../services/api';
 
 export const CustomerManagement: React.FC = () => {
-  const { customers, invoices, quotations, refreshCustomers, addToast, setActivePage } = useApp();
+  const { customers, invoices, quotations, addCustomer, editCustomer, removeCustomer, addToast, setActivePage } = useApp();
 
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -71,7 +71,7 @@ export const CustomerManagement: React.FC = () => {
 
     try {
       if (editingCustomer) {
-        const res = await api.updateCustomer(editingCustomer.id, {
+        await editCustomer(editingCustomer.id, {
           name,
           companyName,
           phone,
@@ -81,13 +81,10 @@ export const CustomerManagement: React.FC = () => {
           city,
           notes,
         });
-        if (res.success) {
-          addToast('success', 'Customer record updated.');
-          setIsModalOpen(false);
-          await refreshCustomers();
-        }
+        addToast('success', 'Customer record updated in Firestore.');
+        setIsModalOpen(false);
       } else {
-        const res = await api.createCustomer({
+        await addCustomer({
           name,
           companyName,
           phone,
@@ -97,11 +94,8 @@ export const CustomerManagement: React.FC = () => {
           city,
           notes,
         });
-        if (res.success) {
-          addToast('success', 'New customer added to directory.');
-          setIsModalOpen(false);
-          await refreshCustomers();
-        }
+        addToast('success', 'New customer added to directory and saved to Firestore.');
+        setIsModalOpen(false);
       }
     } catch (err: any) {
       addToast('error', err.message);
@@ -111,10 +105,9 @@ export const CustomerManagement: React.FC = () => {
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to remove this customer?')) return;
     try {
-      await api.deleteCustomer(id);
-      addToast('info', 'Customer removed.');
+      await removeCustomer(id);
+      addToast('info', 'Customer removed from Firestore.');
       if (selectedCustomer?.id === id) setSelectedCustomer(null);
-      await refreshCustomers();
     } catch (err: any) {
       addToast('error', err.message);
     }

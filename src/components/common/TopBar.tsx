@@ -25,7 +25,7 @@ const PAGE_TITLES: Record<ActivePage, { section: string; title: string }> = {
 };
 
 export const TopBar: React.FC<TopBarProps> = ({ onToggleMobileMenu }) => {
-  const { activePage, setActivePage, isDarkMode, toggleDarkMode, user, openBillingModal } = useApp();
+  const { activePage, setActivePage, isDarkMode, toggleDarkMode, user, openBillingModal, openAuthModal } = useApp();
 
   const currentMeta = PAGE_TITLES[activePage] || { section: 'SmartGrow AI', title: 'Dashboard' };
 
@@ -91,21 +91,30 @@ export const TopBar: React.FC<TopBarProps> = ({ onToggleMobileMenu }) => {
           </div>
         )}
 
-        {/* Upgrade Plan Button */}
-        {user?.plan === 'free' ? (
-          <button
-            onClick={() => openBillingModal('pro')}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors whitespace-nowrap shrink-0"
-          >
-            <Crown className="w-3.5 h-3.5 text-amber-300" />
-            <span>Upgrade</span>
-          </button>
+        {/* User Status / Upgrade Plan Button */}
+        {user ? (
+          user.plan === 'free' ? (
+            <button
+              onClick={() => openBillingModal('pro')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              <Crown className="w-3.5 h-3.5 text-amber-300" />
+              <span>Upgrade</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => setActivePage('pricing')}
+              className="px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md border border-slate-200 dark:border-slate-700 uppercase tracking-wide font-mono"
+            >
+              {user.plan}
+            </button>
+          )
         ) : (
           <button
-            onClick={() => setActivePage('pricing')}
-            className="px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md border border-slate-200 dark:border-slate-700 uppercase tracking-wide font-mono"
+            onClick={() => openAuthModal('login')}
+            className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors whitespace-nowrap shrink-0"
           >
-            {user?.plan}
+            Sign In
           </button>
         )}
 

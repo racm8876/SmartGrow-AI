@@ -27,7 +27,7 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onCloseMobile }) => {
-  const { activePage, setActivePage, user, openBillingModal } = useApp();
+  const { activePage, setActivePage, user, openBillingModal, openAuthModal, signOutUser } = useApp();
 
   const handleNav = (page: ActivePage) => {
     setActivePage(page);
@@ -152,31 +152,63 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onCloseMobile }) => {
 
         {/* User Card & Upgrade Prompt */}
         <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40 shrink-0">
-          <div className="flex items-center gap-3 p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-            <img
-              src={ASSETS.avatarFounder}
-              alt={user?.name || 'User'}
-              className="w-9 h-9 rounded-full object-cover shrink-0 border border-slate-200 dark:border-slate-700"
-            />
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
-                {user?.name || 'Aarav Sharma'}
+          {user ? (
+            <div className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+              <div className="flex items-center gap-2.5 mb-2">
+                <img
+                  src={ASSETS.avatarFounder}
+                  alt={user?.name || 'User'}
+                  className="w-8 h-8 rounded-full object-cover shrink-0 border border-slate-200 dark:border-slate-700"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                    {user?.name || user?.email?.split('@')[0]}
+                  </div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400 capitalize flex items-center gap-1.5 truncate">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                    <span>{user?.plan || 'free'} tier</span>
+                    {user?.plan === 'free' && (
+                      <button
+                        onClick={() => openBillingModal('pro')}
+                        className="text-amber-600 dark:text-amber-400 font-semibold hover:underline"
+                      >
+                        · Upgrade
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-              <div className="text-[11px] text-slate-500 dark:text-slate-400 capitalize flex items-center gap-1.5">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                {user?.plan || 'free'} Plan
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-700/60 flex items-center justify-between text-[11px]">
+                <button
+                  onClick={() => handleNav('settings')}
+                  className="text-slate-500 hover:text-slate-900 dark:hover:text-white"
+                >
+                  Settings
+                </button>
+                <button
+                  onClick={signOutUser}
+                  className="text-red-600 dark:text-red-400 hover:underline font-medium"
+                >
+                  Sign Out
+                </button>
               </div>
             </div>
-            {user?.plan === 'free' && (
+          ) : (
+            <div className="p-2.5 rounded-lg bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-center">
+              <p className="text-xs font-semibold text-blue-900 dark:text-blue-200 mb-1">
+                Sync with Firebase
+              </p>
+              <p className="text-[11px] text-blue-700 dark:text-blue-300 mb-2.5">
+                Sign in to save invoices, resumes, and customers in real-time.
+              </p>
               <button
-                onClick={() => openBillingModal('pro')}
-                className="p-1.5 text-amber-600 hover:text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40 rounded transition-colors"
-                title="Upgrade to Pro"
+                onClick={() => openAuthModal('login')}
+                className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs rounded-md shadow-xs transition-colors"
               >
-                <Crown className="w-4 h-4" />
+                Sign In / Register
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </aside>
     </>

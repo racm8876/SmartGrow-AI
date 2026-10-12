@@ -20,7 +20,7 @@ import { useApp } from '../../context/AppContext';
 import { ASSETS } from '../../assets/images';
 
 export const LandingPage: React.FC = () => {
-  const { setActivePage, openBillingModal } = useApp();
+  const { setActivePage, openBillingModal, user, openAuthModal } = useApp();
   const [openFaq, setOpenFaq] = useState<number | null>(0);
   const [interactiveTab, setInteractiveTab] = useState<'business' | 'job'>('business');
 
@@ -87,13 +87,31 @@ export const LandingPage: React.FC = () => {
 
           {/* Zone 3: 1 Primary CTA */}
           <div className="flex items-center gap-3 shrink-0">
-            <button
-              onClick={() => setActivePage('dashboard')}
-              className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
-            >
-              <span>Open Dashboard</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+            {user ? (
+              <button
+                onClick={() => setActivePage('dashboard')}
+                className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+              >
+                <span>Open Dashboard</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={() => openAuthModal('login')}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap"
+                >
+                  Sign In
+                </button>
+                <button
+                  onClick={() => openAuthModal('signup')}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5"
+                >
+                  <span>Get Started Free</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
           </div>
         </div>
       </header>
@@ -117,10 +135,10 @@ export const LandingPage: React.FC = () => {
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
             <button
-              onClick={() => setActivePage('dashboard')}
+              onClick={() => (user ? setActivePage('dashboard') : openAuthModal('signup'))}
               className="w-full sm:w-auto px-6 py-3 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-md transition-all flex items-center justify-center gap-2"
             >
-              <span>Get Started Free</span>
+              <span>{user ? 'Open Dashboard' : 'Get Started Free'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
             <a

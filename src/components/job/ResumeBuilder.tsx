@@ -18,7 +18,7 @@ import { ResumeData, WorkExperience, Education, Project, Certification } from '.
 import * as api from '../../services/api';
 
 export const ResumeBuilder: React.FC = () => {
-  const { resumes, refreshResumes, addToast, user } = useApp();
+  const { resumes, saveResumeDoc, addToast, user } = useApp();
 
   const currentResume = resumes[0] || {
     id: 'res_new',
@@ -62,14 +62,13 @@ export const ResumeBuilder: React.FC = () => {
 
     setPolishingId(targetId);
     try {
-      const res = await api.polishResumeContent({
-        sectionType: 'Work Experience',
-        rawInput: currentText,
+      const res = await api.polishResumeBullet({
+        rawBullet: currentText,
         targetRole: resume.personal.headline,
       });
 
-      if (res.success && res.data.polishedBullets.length > 0) {
-        const enhanced = res.data.polishedBullets[0].text;
+      if (res.success && res.data?.enhanced) {
+        const enhanced = res.data.enhanced;
         // Update experience bullet
         setResume((prev) => ({
           ...prev,
@@ -89,15 +88,10 @@ export const ResumeBuilder: React.FC = () => {
 
   const handleSaveResume = async () => {
     try {
-      if (resumes.length > 0 && resume.id !== 'res_new') {
-        await api.updateResume(resume.id, resume);
-      } else {
-        await api.createResume(resume);
-      }
-      addToast('success', 'Resume saved successfully!');
-      await refreshResumes();
+      await saveResumeDoc(resume);
+      addToast('success', 'Resume saved to Firestore successfully!');
     } catch (err: any) {
-      addToast('error', err.message);
+      addToast('error', err.message || 'Failed to save resume.');
     }
   };
 

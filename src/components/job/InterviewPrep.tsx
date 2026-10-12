@@ -76,16 +76,21 @@ export const InterviewPrep: React.FC = () => {
   const handleFetchQuestions = async () => {
     setLoadingQuestions(true);
     try {
+      const diffMap: Record<string, 'fresher' | 'mid' | 'senior'> = {
+        fresher: 'fresher',
+        intermediate: 'mid',
+        advanced: 'senior',
+      };
       const res = await api.getInterviewQuestions({
-        role: selectedRole,
-        difficulty,
+        targetRole: selectedRole,
+        difficulty: diffMap[difficulty] || 'mid',
       });
 
-      if (res.success && res.data.questions) {
-        setQuestions(res.data.questions);
-        setExpandedQId(res.data.questions[0]?.id || null);
+      if (res.success && Array.isArray(res.data)) {
+        setQuestions(res.data);
+        setExpandedQId(res.data[0]?.id || null);
         await refreshUserData();
-        addToast('success', `Generated ${res.data.questions.length} interview questions for ${selectedRole}!`);
+        addToast('success', `Generated ${res.data.length} interview questions for ${selectedRole}!`);
       }
     } catch (err: any) {
       addToast('error', err.message || 'Failed to generate questions.');
@@ -113,7 +118,7 @@ export const InterviewPrep: React.FC = () => {
     try {
       const res = await api.evaluateInterviewAnswer({
         question: practicingQuestion.question,
-        candidateAnswer,
+        userAnswer: candidateAnswer,
         targetRole: selectedRole,
       });
 
